@@ -5,6 +5,7 @@ library(dplyr)
 library(fitdistrplus)
 library(beepr)
 library(rstatix)
+library(ggplot2)
 
 #################################################################################
 ## Initalizing Main Variables
@@ -17,42 +18,74 @@ combos <- combos <- combn(c(1:length(Teams)), 2)
 Order <- c(sample(c(1:length(combos[1,])), length(c(1:length(combos[1,]))), replace = FALSE))
 N <- 20
 TrueRatings <- rnorm(length(Teams), mean = 1200, sd = 200) # creates Referant elos
-RatingResult <- list(cbind((-400*(log((1/x)-1,10)))+1200,(pbeta(x,8,6)-pbeta(xs,8,6)))) # Prior Elo Vals
-Count <- 8# Prior Elo Weigth
+RatingResult <- list((pbeta(x,8,6)-pbeta(xs,8,6))) # Prior Elo Vals
+Count <- 10# Prior Elo Weigth
 TeamData <- as.data.frame(cbind(Teams,TrueRatings,Count,RatingResult))
+
+diffs_mat <- outer(EloRange, EloRange, "-")
+win_probs <- 1 / (1 + 10^(-diffs_mat/400))   
+
 ##################################################################################
 
 
 #Generates distributions for combination
-BetaUpdate <-function(N,S,C,CO,VELO,HELO){
+BetaUpdate <-function(N,S,C,VELO,HELO){
   alpha <- S+1 # Evidence Alpha
   beta <- 1+(N-S) #Evidence Beta
   HeroElo <- HELO # prior info about the team we wish to update (The Hero)
   prior <- VELO # prior info about the team the Hero is playing against (The Villan)
   posterior <- prior # just a filler to initialize the Elo range which Prior elo +Rating Differance will be placed into.
-  data <- data.frame("1"=(-400*(log((1/x)-1,10))),"X2" =(pbeta(x,alpha,beta)-pbeta(xs,alpha,beta))) # Beta Dist obtained using alpha = 1+S, Beta = 1+(N-S),  probability of rating differance = (-400*(log((1/x)-1,10)))
-  names(prior) = c("X1","X2")
-  names(HeroElo) = c("X1","X2")
-  names(posterior) = c("X1","X2")
-  names(data) = c("X1","X2")
+  data <- pbeta(x,alpha,beta)-pbeta(xs,alpha,beta) # Beta Dist obtained using alpha = 1+S, Beta = 1+(N-S),  probability of rating differance = (-400*(log((1/x)-1,10)))
   #Elo Shift calculation. Product of Sum (P(Villain Elo = X) * P(Villain Elo - Difference = Y)) for all (X-Y = Difference) = P(HeroElo = Y)
+  
+  W <- N/C
+
   for(i in 1:length(x)){ 
-    diffs <- prior[i,1] - prior[,1]  # vector of differences
-    win_probs <- 1 / (1 + 10^(-diffs / 400))  # logistic win probabilities
-    db <- dbeta(win_probs, alpha, beta)  # beta density evaluated at win_probs
-    weighted_sum <- sum(data[,2] * prior[i,2] * db)
-    posterior[i,2] <- weighted_sum
+
+    db <- dbeta(win_probs[,i], alpha, beta)  # beta density evaluated at win_probs
+    weighted_sum <- sum(data * prior[i] * db)
+    posterior[i] <- weighted_sum
   }
-  posterior[,2]<-posterior[,2]/sum(posterior[,2]) #standerdizze
+  posterior<-posterior/sum(posterior) #standerdizze
+  
+  
   
   
   #Update Hero
-  StanderdX <- data.frame(X1 = HeroElo[,1], X2 = sample(c(0), length(HeroElo[,1]), replace = TRUE)) #Reintroduce Elos of Intrest
   postAdj <- posterior
-  HeroElo[,2] <-   (((C/(C))*HeroElo[,2])+(((N/(C))*postAdj[,2])))/sum((((C/(C))*HeroElo[,2])+(((N/(C))*postAdj[,2])))) # combine the Dists, if more rounds are contained in the Hero Elo then in the postAdj data they should be weighted acordingly.
+  HeroElo <-   (HeroElo+(W*postAdj))/sum((HeroElo+(W*postAdj))) # combine the Dists, if more rounds are contained in the Hero Elo then in the postAdj data they should be weighted acordingly.
   # ^ I.E If we have 20 rounds of info in the HeroElo table and only 10 in the postAdj table, then the formula would be  (((2/3)*(HeroElo[,2]))* ((1/3*postAdj[,2])))/sum(((2/3)*(HeroElo[,2]))* ((1/3*postAdj[,2])) 
-  return(HeroElo)}
+  return(list(HeroElo))}
 
+#Error Calculation
+ErrorCalc <- function(K){
+  print(RoundRecord$EloEstByRound[[K]] - TrueRatings)
+  RMSE <- c()
+  TrueRatingADJ <- TrueRatings + (1200 - mean(TrueRatings))
+  EloEstsADJ <- RoundRecord$EloEstByRound[[K]] + (1200-mean(RoundRecord$EloEstByRound[[K]] ))
+  TrueRatingsDif <- matrix(0,length(Teams),length(Teams))
+  EloEstsDif <- matrix(0,length(Teams),length(Teams))
+  for(i in 1:length(TrueRatingADJ)){
+    for(j in 1:length(TrueRatingADJ)){
+      TrueRatingsDif[i,j] <- TrueRatingADJ[i]-TrueRatingADJ[j]
+      EloEstsDif[i,j] <- EloEstsADJ[i] - EloEstsADJ[j]
+    }
+  }
+  
+  EloEstsDif <- as.matrix(pull_lower_triangle(EloEstsDif, diagonal = TRUE))
+  EloEstsDif <- as.double(as.vector(EloEstsDif)[which(as.vector(EloEstsDif) != "")])
+  EloEstsDif <- EloEstsDif[which(EloEstsDif != 0)]
+  
+  TrueRatingsDif<- as.matrix(pull_lower_triangle(TrueRatingsDif, diagonal = TRUE))
+  TrueRatingsDif <- as.double(as.vector(TrueRatingsDif)[which(as.vector(TrueRatingsDif) != "")])
+  TrueRatingsDif <- TrueRatingsDif[which(TrueRatingsDif != 0)]
+  
+  ErrorMatrix <- EloEstsDif-TrueRatingsDif
+  RMSE <- sqrt(mean(ErrorMatrix^2))
+  MeanError <- mean(ErrorMatrix)
+  print(paste("RMSE:", sqrt(mean(ErrorMatrix^2)), "ME:", MeanError))
+  return(RMSE)
+}
 ##################################################################################
 TrueProb <- matrix(0,length(Teams),length(Teams))
 IdealOutcomes <- matrix(0,length(Teams),length(Teams))
@@ -73,87 +106,73 @@ print(TrueRatings)
 
 ###############################################################################
 ## Recording tool
-RoundRecord <- data.frame(Round = c(1:5), EloEstByRound = c(1:5))
+RoundRecord <- data.frame(Round = c(1:5), EloEstByRound = c(1:5), ErrByRound = c(1:5), RMSE = c(1:5))
 for( i in 1:length(RoundRecord$EloEstByRound)){
   RoundRecord$EloEstByRound[i] <- list(c(1:length(TrueRatings)))
+  RoundRecord$ErrByRound[i] <- list(c(1:length(TrueRatings)))
 }
 ErrorRecord <- data.frame(Teams,Trial = 1 ,ErrorbyRound = c(1:length(Teams)))
 ErrorRecord$ErrorbyRound[1:length(Teams)] <- list(c(1:length(Teams)))
 
-
-RunTime <- ((length(Teams)-1)*(length(Teams)))/2
-Trial <- 0
-## Main Calc Loop
-
-  for( i in 1:length(Order)){
+for(k in 1){
+  RunTime <- ((length(Teams)-1)*(length(Teams)))/2
+  Trial <- 0
+  ## Main Calc Loop
+  
+  for( i in Order){
     Start <- Sys.time()
- 
-    
+    Home <- combos[1,i]
+    Away <- combos[2,i]
     # Pass Info into BetaFunction
-    Hold <- BetaUpdate(20,IdealOutcomes[combos[2,Order[i]],combos[1,Order[i]]],TeamData$Count[[combos[2,Order[i]]]][1],TeamData$Count[[combos[1,Order[i]]]][1],as.data.frame(TeamData$RatingResult[[combos[1,Order[i]]]]),as.data.frame(TeamData$RatingResult[[combos[2,Order[i]]]])) #Update J
-    TeamData$RatingResult[[combos[1,Order[i]]]] <- BetaUpdate(20,IdealOutcomes[combos[1,Order[i]],combos[2,Order[i]]],TeamData$Count[[combos[1,Order[i]]]][1],TeamData$Count[[combos[2,Order[i]]]][1],as.data.frame(TeamData$RatingResult[[combos[2,Order[i]]]]),as.data.frame(TeamData$RatingResult[[combos[1,Order[i]]]])) #Update i
-    TeamData$Count[[combos[1,Order[i]]]][1] <- TeamData$Count[[combos[1,Order[i]]]][1] + 20 #Update Count i
-    TeamData$Count[[combos[2,Order[i]]]][1] <- TeamData$Count[[combos[2,Order[i]]]][1] + 20 #update Count j
-    TeamData$RatingResult[[combos[2,Order[i]]]] <- Hold # pass hold so it dosent influance i calc
-    ##Ploting To Track
-    plot(TeamData$RatingResult[[combos[1,Order[i]]]][,1],TeamData$RatingResult[[combos[1,Order[i]]]][,2], type = 'l', main = paste("Hero:",Teams[combos[1,Order[i]]],"Villan:",Teams[combos[2,Order[i]]]))
-    abline(v= sum(TeamData$RatingResult[[combos[1,Order[i]]]][,1]*TeamData$RatingResult[[combos[1,Order[i]]]][,2]), col = 'red' )
-    abline(v = TrueRatings[combos[1,Order[i]]])
+    HOLD <- BetaUpdate(20,IdealOutcomes[Away,Home],TeamData$Count[[Home]],TeamData$RatingResult[[Away]],TeamData$RatingResult[[Home]])
+    HOLDAwy <- BetaUpdate(20,IdealOutcomes[Home,Away],TeamData$Count[[Away]],TeamData$RatingResult[[Home]],TeamData$RatingResult[[Away]])
+    
+    TeamData$RatingResult[[Home]] <- HOLD[[1]]
+    TeamData$RatingResult[[Away]] <- HOLDAwy[[1]]
+    TeamData$Count[[Home]] <- TeamData$Count[[Home]] +20
+    TeamData$Count[[Away]] <-  TeamData$Count[[Away]] +20
+    
     Trial <- Trial +1
-    print(paste("Hero:",combos[1,Order[i]],"Villan:",combos[2,Order[i]], "Progress:", round((Trial/RunTime)*100,2), "%"))
-    print(paste("True:",TrueRatings[combos[1,Order[i]]] ,"Est:",sum(TeamData$RatingResult[[combos[1,Order[i]]]][,1]*TeamData$RatingResult[[combos[1,Order[i]]]][,2]) ,"error:",sum(TeamData$RatingResult[[combos[1,Order[i]]]][,1]*TeamData$RatingResult[[combos[1,Order[i]]]][,2])-TrueRatings[combos[1,Order[i]]]))
+    print(paste("Hero:",Teams[Home],"Villan:", Teams[Away], "Progress:", round((Trial/RunTime)*100,2), "%"))
+    print(paste("True:",TrueRatings[Home] ,"Est:",sum(TeamData$RatingResult[[Home]]*EloRange)  ,"error:",sum(TeamData$RatingResult[[Home]]*EloRange) - TeamData$TrueRatings[[Home]]))
     
- 
-    ErrorRecord$ErrorbyRound[[combos[1,Order[i]]]][ErrorRecord$Trial[combos[1,Order[i]]]] <- sum(TeamData$RatingResult[[combos[1,Order[i]]]][,1]*TeamData$RatingResult[[combos[1,Order[i]]]][,2])-TrueRatings[combos[1,Order[i]]]
-    ErrorRecord$Trial[combos[1,Order[i]]] <-  ErrorRecord$Trial[combos[1,Order[i]]] +1
+    plot(EloRange,TeamData$RatingResult[[Home]], type = 'l', main = paste("Hero:",Teams[Home],"Villan:",Teams[Away]))
+    abline(v= sum(EloRange*TeamData$RatingResult[[Home]]), col = 'red' )
+    abline(v = TrueRatings[Home])
     
-    ErrorRecord$ErrorbyRound[[combos[2,Order[i]]]][ErrorRecord$Trial[combos[2,Order[i]]]] <- sum(TeamData$RatingResult[[combos[2,Order[i]]]][,1]*TeamData$RatingResult[[combos[2,Order[i]]]][,2])-TrueRatings[combos[2,Order[i]]]
-    ErrorRecord$Trial[combos[2,Order[i]]] <-  ErrorRecord$Trial[combos[2,Order[i]]] +1
+    
+    
+    
+    ErrorRecord$ErrorbyRound[[Home]][ErrorRecord$Trial[Home]] <- sum(TeamData$RatingResult[[Home]]*EloRange) -TeamData$TrueRatings[[Home]]
+    ErrorRecord$Trial[Home] <- ErrorRecord$Trial[[Home]] + 1
+    ErrorRecord$ErrorbyRound[[Away]][ErrorRecord$Trial[Away]] <- sum(TeamData$RatingResult[[Away]]*EloRange) -TeamData$TrueRatings[[Away]]
+    ErrorRecord$Trial[Away] <- ErrorRecord$Trial[[Away]] + 1
+    
     
     print(Sys.time()-Start)
-    }
-
-  ### Record Stages by Itteration
+  }
+  
+### Record Stages by Itteration
   RoundRecStore <- c()
+  ErrRecStore <- c()
   for(i in 1:length(RoundRecord$EloEstByRound[[1]])){
     print(i)
-  RoundRecStore[i] <- sum(TeamData$RatingResult[[i]][,1]*TeamData$RatingResult[[i]][,2])
+    RoundRecStore[i] <- sum(EloRange*TeamData$RatingResult[[i]])
+    ErrRecStore[i] <- sum(EloRange*TeamData$RatingResult[[i]]) - TrueRatings[i]
   }
-  RoundRecord$EloEstByRound[[1]] <-RoundRecStore
-  
+  RoundRecord$EloEstByRound[[k]] <-RoundRecStore
+  RoundRecord$ErrByRound[[k]] <- ErrRecStore - mean(ErrRecStore)
+  RoundRecord$RMSE[k] <- sqrt(mean((ErrRecStore - mean(ErrRecStore))^2))
   Order <- c(sample(c(1:length(combos[1,])), length(c(1:length(combos[1,]))), replace = FALSE))
-
-
-beep(sound = 8)
-
-
-print(RoundRecord$EloEstByRound[[1]] - TrueRatings)
-RMSE <- c()
-TrueRatingADJ <- TrueRatings + (1200 - mean(TrueRatings))
-EloEstsADJ <- RoundRecord$EloEstByRound[[1]] + (1200-mean(RoundRecord$EloEstByRound[[1]] ))
-TrueRatingsDif <- matrix(0,length(Teams),length(Teams))
-EloEstsDif <- matrix(0,length(Teams),length(Teams))
-for(i in 1:length(TrueRatingADJ)){
-  for(j in 1:length(TrueRatingADJ)){
-    TrueRatingsDif[i,j] <- TrueRatingADJ[i]-TrueRatingADJ[j]
-    EloEstsDif[i,j] <- EloEstsADJ[i] - EloEstsADJ[j]
-  }
+  
+  ErrorCalc(k)
+  
+  beep(sound = 8)
 }
 
-EloEstsDif <- as.matrix(pull_lower_triangle(EloEstsDif, diagonal = TRUE))
-EloEstsDif <- as.double(as.vector(EloEstsDif)[which(as.vector(EloEstsDif) != "")])
-EloEstsDif <- EloEstsDif[which(EloEstsDif != 0)]
 
-TrueRatingsDif<- as.matrix(pull_lower_triangle(TrueRatingsDif, diagonal = TRUE))
-TrueRatingsDif <- as.double(as.vector(TrueRatingsDif)[which(as.vector(TrueRatingsDif) != "")])
-TrueRatingsDif <- TrueRatingsDif[which(TrueRatingsDif != 0)]
 
-ErrorMatrix <- EloEstsDif-TrueRatingsDif
-RMSE <- sqrt(mean(ErrorMatrix^2))
-MeanError <- mean(ErrorMatrix)
 
-print(paste("RMSE:", sqrt(mean(ErrorMatrix^2)), "ME:", MeanError))
-plot(c(1000:1400),dnorm(c(1000:1400),mean=MeanError+1200, sd = RMSE))
 
 
 ##### Error Track
@@ -169,14 +188,18 @@ RoundErr <- c()
 for( j in 1:(length(ErrorRecord$ErrorbyRound[[1]])-1)){
   ErrJ <- c()
   for(i in 1:(length(ErrorRecord$Teams))){
-  ErrJ[i] <- ErrorRecord$ErrorbyRound[[i]][j] 
+    ErrJ[i] <- ErrorRecord$ErrorbyRound[[i]][j] 
   }
- 
-  RMSERound[j] <-sqrt(mean((ErrJ = mean(ErrJ))^2))
+  print(sd(ErrJ))
+  RMSERound[j] <-sqrt(mean((ErrJ -mean(ErrJ))^2))
   RoundErr[j] <- mean(ErrJ)
 }
 
-RMSEDat <- data.frame("Round" = c(1:19),"MeanErr" = RoundErr, "RoundVar" = RMSERound)
+RMSEDat <- data.frame("Round" = c(1:(length(ErrorRecord$ErrorbyRound[[1]])-1)),"MeanErr" = RoundErr, "RoundVar" = RMSERound)
 
 
-p1 <- ggplot(RMSEDat, aes(Round)) + geom_line(aes(y = 1/(1+ (10^(MeanErr/400)))-0.5), color = 'black', linewidth = 2) + geom_ribbon(aes(ymin = 1/(1+ (10^((RoundErr - (2*RoundVar))/400)))-0.5, ymax = 1/(1+ (10^((RoundErr + (2*RoundVar))/400)))-0.5  ), color = "red", alpha = 0.2, fill = 'red') + geom_ribbon(aes(ymin = 1/(1+ (10^((RoundErr - (RoundVar))/400)))-0.5 , ymax = 1/(1+ (10^((RoundErr + (RoundVar))/400)))-0.5 ), color = "red", alpha = 0.4, fill = 'red')
+p1 <- ggplot(RMSEDat, aes(Round)) + geom_line(aes(y = c(sample(c(0),(length(ErrorRecord$ErrorbyRound[[1]])-1),replace = TRUE))), color = 'black', linewidth = 2)
+p2<- p1 + geom_ribbon(aes(ymin = 1/(1+(10^((RoundVar)/400)))-0.5, ymax = 0.5-(1/(1+(10^((RoundVar)/400))))), color = "red", alpha = 0.2, fill = 'red') 
+p3 <- p2 + geom_ribbon(aes(ymin =(1/(1+(10^((2*RoundVar)/400))))-0.5 , ymax = 0.5-(1/(1+(10^((2*RoundVar)/400))))), color = "red", alpha = 0.4, fill = 'red')
+print(p3)
+print((1/(1+10^(RMSEDat$RoundVar[(length(ErrorRecord$ErrorbyRound[[1]])-1)]/400)))-0.5)
